@@ -1,7 +1,6 @@
 clearml==1.1.5
-numpy
-geopandas
-pandas
-rasterio
-shapely
-os
+numpy==1.22.3
+geopandas==0.10.2
+pandas==1.4.2
+rasterio==1.2.10
+shapely==1.8.2
