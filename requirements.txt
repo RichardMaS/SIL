@@ -1,0 +1,7 @@
+clearml==1.1.5
+numpy
+geopandas
+pandas
+rasterio
+shapely
+os

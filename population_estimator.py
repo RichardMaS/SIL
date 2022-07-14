@@ -1,0 +1,131 @@
+import time
+
+import clearml
+from clearml import Task, Dataset
+import numpy as np
+import geopandas as gpd
+import pandas as pd
+import rasterio
+from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, box
+import shapely.vectorized
+import os
+
+# create/upload datasets on ClearML
+# dataset_name = 'Ethnologue Population Mapping'
+# dataset = Dataset.create(
+#     dataset_project="Ethnologue_Richard_Internship", dataset_name=dataset_name
+# )
+# num_links = dataset.add_files(path="./Language Polygons/SIL_lang_polys_June2022/", dataset_path="/Language Polygons/")
+# num_links += dataset.add_files(path="./population_af_2018-10-01/", dataset_path="/Facebook Dataset/")
+# dataset.upload()
+# print(f"Dataset '{dataset_name}' generated, with {num_links} files added.")
+# dataset.finalize()
+
+
+# prepare task on ClearML
+Task.add_requirements("-rrequirements.txt")
+task = Task.init(
+  project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
+  task_name='Zambia' + str(int(time.time())), # task name of at least 3 characters
+  task_type="training",
+  tags=None,
+  reuse_last_task_id=True,
+  continue_last_task=False,
+  output_uri="s3://richard-ethnologue-gis",
+  auto_connect_arg_parser=True,
+  auto_connect_frameworks=True,
+  auto_resource_monitoring=True,
+  auto_connect_streams=True,
+)
+
+fp = "Language Polygons/SIL_lang_polys_June2022.shp"
+data = gpd.read_file(fp)
+
+# CHANGE COUNTRY LABELS HERE
+ctry_name = "Zambia"
+ctry_abbr = "ZMB"
+
+grouped = data.groupby("COUNTRY_IS")
+#ctry = grouped.get_group(ctry_abbr, data)
+#ctry["Population"] = 0
+ctry = gpd.read_file(outfp)
+
+# move to country's file directory (or create new folder for country if not already existing)
+ctry_dir = os.path.join("Countries", ctry_name)
+if not os.path.exists(ctry_dir):
+    os.makedirs(ctry_dir)
+os.chdir(ctry_dir)
+
+population_data = "../../population_af_2018-10-01"
+tifs = list() # get only the tif files from population data
+for file in os.listdir(population_data):
+    if file[-4:] == ".tif":
+        tifs.append(file)
+
+outfp = f"{ctry_name}_Population_Estimates.shp"
+not_opened = ["population_AF23_2018-10-01.tif",
+              "population_AF24_2018-10-01.tif",
+              "population_AF22_2018-10-01.tif"] # these files keep causing kernel to crash
+
+if os.path.exists("Population_files_not_opened.txt"):
+    ctry = gpd.read_file(outfp) # in case kernel crashes, keep track of progress
+    with open("Population_files_not_opened.txt",'r') as f:
+        not_opened = f.read().splitlines()
+
+while len(not_opened) > 0:
+    file = not_opened.pop()
+    src = rasterio.open(os.path.join(population_data, file), "r")
+    print(f"Opening {file}")
+    #print(src.meta)
+    transformer = src.meta['transform']
+    width = src.meta['width']
+    height = src.meta['height']
+
+    # TODO: get location of raster data and check if it overlaps with any of the language polygons
+    overlap_polys = list()
+    region = box(*src.bounds)
+
+    for i in ctry.index.values:
+        poly = ctry.loc[i, "geometry"]
+        if type(poly) == Polygon:
+            poly_list = [poly]
+        elif type(poly) == MultiPolygon:
+            poly_list = list(poly)
+
+        for p in poly_list:
+            checker = MultiPolygon([p, region])
+            if not checker.is_valid:
+                overlap_polys.append((i,p))
+
+    # If yes: create masks from language polygons and sum over src pixel values with label True
+    if len(overlap_polys) > 0:
+        print(f"{file} overlaps with language polys!")
+        # multi_poly = MultiPolygon(list(zip(*overlap_polys))[1])
+
+        coords = np.indices((width, height)) # image coordinates
+        print("Transforming the coordinates...")
+        x,y = transformer * coords # transform to geo coords (this step is REALLY slow!)
+        print("Reading the raster data...")
+        vals = src.read(1) # 2D population raster data
+        print("Getting the population counts...")
+
+        for i,p in overlap_polys:
+            mask = shapely.vectorized.contains(p, x, y)
+            print(mask.shape, vals.shape)
+            #pop_count = vals.transpose() * mask # element-wise multiplication
+            pop_count = np.extract(mask, vals.transpose())
+            print("Hi!")
+            ctry.loc[i, "Population"] += np.nansum(pop_count)
+            print("Yay, I finished one polygon!")
+
+        print("All overlapping polygons have been successfully parsed.")
+        # update files with new counts
+        ctry.to_file(outfp)
+        with open("Population_files_not_opened.txt", 'w') as f:
+            f.write("\n".join(not_opened))
+
+# reaching end of while loop means all population files were parsed
+os.remove("Population_files_not_opened.txt")
+
+# Save the artifact in ClearML
+task.upload_artifact(name='zambia', artifact_object='zambia/')
