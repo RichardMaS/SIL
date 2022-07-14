@@ -10,8 +10,9 @@ from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineSt
 import shapely.vectorized
 import os
 
+dataset_name = 'Ethnologue Population Mapping'
+
 # create/upload datasets on ClearML
-# dataset_name = 'Ethnologue Population Mapping'
 # dataset = Dataset.create(
 #     dataset_project="Ethnologue_Richard_Internship", dataset_name=dataset_name
 # )
@@ -38,7 +39,8 @@ task = Task.init(
   auto_connect_streams=True,
 )
 
-fp = "Language Polygons/SIL_lang_polys_June2022.shp"
+dataset_path = Dataset.get(dataset_project='Ethnologue_Richard_Internship', dataset_name=dataset_name).get_local_copy()
+fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
 data = gpd.read_file(fp)
 
 # CHANGE COUNTRY LABELS HERE
@@ -46,9 +48,8 @@ ctry_name = "Zambia"
 ctry_abbr = "ZMB"
 
 grouped = data.groupby("COUNTRY_IS")
-#ctry = grouped.get_group(ctry_abbr, data)
-#ctry["Population"] = 0
-ctry = gpd.read_file(outfp)
+ctry = grouped.get_group(ctry_abbr, data)
+ctry["Population"] = 0
 
 # move to country's file directory (or create new folder for country if not already existing)
 ctry_dir = os.path.join("Countries", ctry_name)
@@ -56,16 +57,17 @@ if not os.path.exists(ctry_dir):
     os.makedirs(ctry_dir)
 os.chdir(ctry_dir)
 
-population_data = "../../population_af_2018-10-01"
+population_data = os.path.join(dataset_path, "Facebook Dataset")
 tifs = list() # get only the tif files from population data
 for file in os.listdir(population_data):
     if file[-4:] == ".tif":
         tifs.append(file)
 
 outfp = f"{ctry_name}_Population_Estimates.shp"
-not_opened = ["population_AF23_2018-10-01.tif",
-              "population_AF24_2018-10-01.tif",
-              "population_AF22_2018-10-01.tif"] # these files keep causing kernel to crash
+not_opened = tifs[:]
+# not_opened = ["population_AF23_2018-10-01.tif",
+#               "population_AF24_2018-10-01.tif",
+#               "population_AF22_2018-10-01.tif"] # these files keep causing kernel to crash
 
 if os.path.exists("Population_files_not_opened.txt"):
     ctry = gpd.read_file(outfp) # in case kernel crashes, keep track of progress
