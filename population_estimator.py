@@ -116,7 +116,6 @@ while len(not_opened) > 0:
             print(mask.shape, vals.shape)
             #pop_count = vals.transpose() * mask # element-wise multiplication
             pop_count = np.extract(mask, vals.transpose())
-            print("Hi!")
             ctry.loc[i, "Population"] += np.nansum(pop_count)
             print("Yay, I finished one polygon!")
 
@@ -129,5 +128,11 @@ while len(not_opened) > 0:
 # reaching end of while loop means all population files were parsed
 os.remove("Population_files_not_opened.txt")
 
+# write results to csv file
+result = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "Population"]]
+result.rename(columns={"ISO_LANGUA": "ISO_639",
+                       "COUNTRY_IS": "COUNTRY"})
+# result.to_csv(f"{ctry_name}_Population_Estimates.csv")
+
 # Save the artifact in ClearML
-task.upload_artifact(name='zambia', artifact_object='zambia/')
+task.upload_artifact(name='zambia', artifact_object=result)
