@@ -111,13 +111,27 @@ while len(not_opened) > 0:
         vals = src.read(1) # 2D population raster data
         print("Getting the population counts...")
 
-        for i,p in overlap_polys:
-            mask = shapely.vectorized.contains(p, x, y)
-            print(mask.shape, vals.shape)
-            #pop_count = vals.transpose() * mask # element-wise multiplication
-            pop_count = np.extract(mask, vals.transpose())
-            ctry.loc[i, "Population"] += np.nansum(pop_count)
-            print("Yay, I finished one polygon!")
+        allow_overcounts = True # boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
+                                # If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
+        if not allow_overcounts:
+            for i,p in overlap_polys:
+                mask = shapely.vectorized.contains(p, x, y)
+                print(mask.shape, vals.shape)
+                #pop_count = vals.transpose() * mask # element-wise multiplication
+                pop_count = np.extract(mask, vals.transpose())
+                ctry.loc[i, "Population"] += np.nansum(pop_count)
+                print("Yay, I finished one polygon!")
+
+        else:
+            equalizer_inv = np.zeros((width, height))
+            for i,p in overlap_polys:
+                mask = shapely.vectorized.contains(p, x, y)
+                equalizer_inv += mask
+            equalizer_inv[equalizer_inv == 0] = np.inf
+            for i,p in overlap_polys:
+                pop_count = 1/equalizer_inv * vals.transpose()
+                ctry.loc[i,"Population"] += np.nansum(pop_count)
+                print("Yay, I finished one polygon!")
 
         print("All overlapping polygons have been successfully parsed.")
         # update files with new counts
