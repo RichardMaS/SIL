@@ -27,7 +27,7 @@ dataset_name = 'Ethnologue Population Mapping'
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name='Sao Tome and Principe' + str(int(time.time())), # task name of at least 3 characters
+  task_name='Guinea-Bissau' + str(int(time.time())), # task name of at least 3 characters
   task_type="training",
   tags=None,
   reuse_last_task_id=True,
@@ -44,8 +44,8 @@ fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
 data = gpd.read_file(fp)
 
 # CHANGE COUNTRY LABELS HERE
-ctry_name = "SaoTome_and_Principe"
-ctry_abbr = "STP"
+ctry_name = "Guinea-Bissau"
+ctry_abbr = "GNB"
 
 grouped = data.groupby("COUNTRY_IS")
 ctry = grouped.get_group(ctry_abbr, data)
