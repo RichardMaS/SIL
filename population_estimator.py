@@ -124,12 +124,14 @@ while len(not_opened) > 0:
 
         else:
             equalizer_inv = np.zeros((width, height))
+            poly_masks = list()
             for i,p in overlap_polys:
                 mask = shapely.vectorized.contains(p, x, y)
                 equalizer_inv += mask
+                poly_masks.append((i,mask))
             equalizer_inv[equalizer_inv == 0] = np.inf
-            for i,p in overlap_polys:
-                pop_count = 1/equalizer_inv * vals.transpose()
+            for i,mask in poly_masks:
+                pop_count = 1/equalizer_inv * mask * vals.transpose()
                 ctry.loc[i,"Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
 
