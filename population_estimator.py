@@ -27,7 +27,7 @@ dataset_name = 'Ethnologue Population Mapping'
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name='Guinea-Bissau' + str(int(time.time())), # task name of at least 3 characters
+  task_name='Kenya' + str(int(time.time())), # task name of at least 3 characters
   task_type="training",
   tags=None,
   reuse_last_task_id=True,
@@ -44,8 +44,8 @@ fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
 data = gpd.read_file(fp)
 
 # CHANGE COUNTRY LABELS HERE
-ctry_name = "Guinea-Bissau"
-ctry_abbr = "GNB"
+ctry_name = "Kenya"
+ctry_abbr = "KEN"
 
 grouped = data.groupby("COUNTRY_IS")
 ctry = grouped.get_group(ctry_abbr, data)
@@ -127,6 +127,7 @@ while len(not_opened) > 0:
             poly_masks = list()
             for i,p in overlap_polys:
                 mask = shapely.vectorized.contains(p, x, y)
+                print(mask.shape, vals.shape)
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
             equalizer_inv[equalizer_inv == 0] = np.inf
@@ -151,4 +152,4 @@ result.rename(columns={"ISO_LANGUA": "ISO_639",
 # result.to_csv(f"{ctry_name}_Population_Estimates.csv")
 
 # Save the artifact in ClearML
-task.upload_artifact(name='SaoTome_and_Principe', artifact_object=result)
+task.upload_artifact(name='Kenya', artifact_object=result)
