@@ -28,16 +28,14 @@ def create_mask(poly, x_coords, y_coords):
         # recursively subdivide the raster band into smaller chunks, then re-combine them
         if len(x_coords) < len(y_coords):
             split = len(y_coords) // 2
-            y_upper, y_lower = y_coords[:split], y_coords[split:]
-            mask_upper = create_mask(poly, x_coords, y_upper)
-            mask_lower = create_mask(poly, x_coords, y_lower)
-            mask_final = np.vstack((mask_upper, mask_lower))
+            mask_left = create_mask(poly, x_coords[:, :split], y_coords[:, :split])
+            mask_right = create_mask(poly, x_coords[:, split:], y_coords[:, split:])
+            mask_final = np.hstack((mask_left, mask_right))
         else:
             split = len(x_coords) // 2
-            x_left, x_right = x_coords[:split], x_coords[split:]
-            mask_left = create_mask(poly, x_left, y_coords)
-            mask_right = create_mask(poly, x_right, y_coords)
-            mask_final = np.hstack((mask_left, mask_right))
+            mask_upper = create_mask(poly, x_coords[:split, :], y_coords[:split, :])
+            mask_lower = create_mask(poly, x_coords[split:, :], y_coords[split:, :])
+            mask_final = np.vstack((mask_upper, mask_lower))
     return mask_final
 
 dataset_name = 'Ethnologue Population Mapping'
@@ -56,7 +54,7 @@ dataset_name = 'Ethnologue Population Mapping'
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name='test_overflow' + str(int(time.time())), # task name of at least 3 characters
+  task_name='Uganda' + str(int(time.time())), # task name of at least 3 characters
   task_type="training",
   tags=None,
   reuse_last_task_id=True,
@@ -93,8 +91,7 @@ for file in os.listdir(population_data):
         tifs.append(file)
 
 outfp = f"{ctry_name}_Population_Estimates.shp"
-# not_opened = tifs[:]
-not_opened = ["population_AF26_2018-10-01.tif"] # these files keep causing kernel to crash
+not_opened = tifs[:]
 
 if os.path.exists("Population_files_not_opened.txt"):
     ctry = gpd.read_file(outfp) # in case kernel crashes, keep track of progress
@@ -156,7 +153,6 @@ while len(not_opened) > 0:
                 # if raster band is too large, split in half and re-merge (repeat until no error raised)
                 mask = create_mask(p, x, y)
                 print(mask.shape, vals.shape)
-                break
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
             equalizer_inv[equalizer_inv == 0] = np.inf
