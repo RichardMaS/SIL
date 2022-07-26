@@ -40,9 +40,9 @@ def create_mask(poly, x_coords, y_coords):
             mask_final = np.hstack((mask_left, mask_right))
     return mask_final
 
+dataset_name = 'Ethnologue Population Mapping'
 
 # REMOVED: create/upload datasets on ClearML
-# dataset_name = 'Ethnologue Population Mapping'
 # dataset = Dataset.create(
 #     dataset_project="Ethnologue_Richard_Internship", dataset_name=dataset_name
 # )
@@ -56,7 +56,7 @@ def create_mask(poly, x_coords, y_coords):
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name='Uganda' + str(int(time.time())), # task name of at least 3 characters
+  task_name='test_overflow' + str(int(time.time())), # task name of at least 3 characters
   task_type="training",
   tags=None,
   reuse_last_task_id=True,
