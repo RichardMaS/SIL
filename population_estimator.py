@@ -10,9 +10,39 @@ from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineSt
 import shapely.vectorized
 import os
 
-dataset_name = 'Ethnologue Population Mapping'
+def create_mask(poly, x_coords, y_coords):
+    '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
+    that would normally be the output of `shapely.vectorized.contains(poly, x_coords, y_coords)`
+    but is also able to handle any potential OverflowErrors'''
 
-# create/upload datasets on ClearML
+    def handle_overflow(p, x, y):
+        '''Returns Shapely.contains mask as intended if no OverflowError is detected,
+        otherwise returns the OverflowError exception that would have been raised'''
+        try: mask = shapely.vectorized.contains(p, x, y)
+        except OverflowError as e:
+            return e
+        return mask
+
+    mask_final = handle_overflow(poly, x_coords, y_coords)
+    while isinstance(mask_final, OverflowError):
+        # recursively subdivide the raster band into smaller chunks, then re-combine them
+        if len(x_coords) < len(y_coords):
+            split = len(y_coords) // 2
+            y_upper, y_lower = y_coords[:split], y_coords[split:]
+            mask_upper = create_mask(poly, x_coords, y_upper)
+            mask_lower = create_mask(poly, x_coords, y_lower)
+            mask_final = np.vstack((mask_upper, mask_lower))
+        else:
+            split = len(x_coords) // 2
+            x_left, x_right = x_coords[:split], x_coords[split:]
+            mask_left = create_mask(poly, x_left, y_coords)
+            mask_right = create_mask(poly, x_right, y_coords)
+            mask_final = np.hstack((mask_left, mask_right))
+    return mask_final
+
+
+# REMOVED: create/upload datasets on ClearML
+# dataset_name = 'Ethnologue Population Mapping'
 # dataset = Dataset.create(
 #     dataset_project="Ethnologue_Richard_Internship", dataset_name=dataset_name
 # )
@@ -21,7 +51,6 @@ dataset_name = 'Ethnologue Population Mapping'
 # dataset.upload()
 # print(f"Dataset '{dataset_name}' generated, with {num_links} files added.")
 # dataset.finalize()
-
 
 # prepare task on ClearML
 Task.add_requirements("-rrequirements.txt")
@@ -43,7 +72,7 @@ dataset_path = Dataset.get(dataset_project='Ethnologue_Richard_Internship', data
 fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
 data = gpd.read_file(fp)
 
-# CHANGE COUNTRY LABELS HERE
+### CHANGE COUNTRY LABELS HERE ###
 ctry_name = "Uganda"
 ctry_abbr = "UGA"
 
@@ -64,10 +93,8 @@ for file in os.listdir(population_data):
         tifs.append(file)
 
 outfp = f"{ctry_name}_Population_Estimates.shp"
-not_opened = tifs[:]
-# not_opened = ["population_AF23_2018-10-01.tif",
-#               "population_AF24_2018-10-01.tif",
-#               "population_AF22_2018-10-01.tif"] # these files keep causing kernel to crash
+# not_opened = tifs[:]
+not_opened = ["population_AF26_2018-10-01.tif"] # these files keep causing kernel to crash
 
 if os.path.exists("Population_files_not_opened.txt"):
     ctry = gpd.read_file(outfp) # in case kernel crashes, keep track of progress
@@ -115,7 +142,7 @@ while len(not_opened) > 0:
                                 # If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
         if not allow_overcounts:
             for i,p in overlap_polys:
-                mask = shapely.vectorized.contains(p, x, y)
+                mask = create_mask(p, x, y)
                 print(mask.shape, vals.shape)
                 #pop_count = vals.transpose() * mask # element-wise multiplication
                 pop_count = np.extract(mask, vals.transpose())
@@ -126,8 +153,10 @@ while len(not_opened) > 0:
             equalizer_inv = np.zeros((width, height))
             poly_masks = list()
             for i,p in overlap_polys:
-                mask = shapely.vectorized.contains(p, x, y)
+                # if raster band is too large, split in half and re-merge (repeat until no error raised)
+                mask = create_mask(p, x, y)
                 print(mask.shape, vals.shape)
+                break
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
             equalizer_inv[equalizer_inv == 0] = np.inf
