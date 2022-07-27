@@ -32,11 +32,16 @@ def create_mask(poly, x_coords, y_coords):
             mask_left = create_mask(poly, x_coords[:, :split], y_coords[:, :split])
             mask_right = create_mask(poly, x_coords[:, split:], y_coords[:, split:])
             mask_final = np.hstack((mask_left, mask_right))
+            del mask_left
+            del mask_right
         else:
             split = len(x_coords) // 2
             mask_upper = create_mask(poly, x_coords[:split, :], y_coords[:split, :])
             mask_lower = create_mask(poly, x_coords[split:, :], y_coords[split:, :])
             mask_final = np.vstack((mask_upper, mask_lower))
+            del mask_upper
+            del mask_lower
+        gc.collect()
     return mask_final
 
 dataset_name = 'Ethnologue Population Mapping'
@@ -154,10 +159,10 @@ while len(tifs) > 0:
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
                 del mask
+            gc.collect()
             equalizer_inv[equalizer_inv == 0] = np.inf
             equalizer = 1/equalizer_inv
             del equalizer_inv
-            gc.collect()
             for i,mask in poly_masks:
                 pop_count = equalizer * mask * vals.transpose()
                 ctry.loc[i,"Population"] += np.nansum(pop_count)
