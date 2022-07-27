@@ -9,6 +9,7 @@ import rasterio
 from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, box
 import shapely.vectorized
 import os
+import gc
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -78,11 +79,15 @@ grouped = data.groupby("COUNTRY_IS")
 ctry = grouped.get_group(ctry_abbr, data)
 ctry["Population"] = 0
 
-# move to country's file directory (or create new folder for country if not already existing)
-ctry_dir = os.path.join("Countries", ctry_name)
-if not os.path.exists(ctry_dir):
-    os.makedirs(ctry_dir)
-os.chdir(ctry_dir)
+del data
+del grouped
+gc.collect()
+
+# REMOVED: move to country's file directory (or create new folder for country if not already existing)
+# ctry_dir = os.path.join("Countries", ctry_name)
+# if not os.path.exists(ctry_dir):
+#     os.makedirs(ctry_dir)
+# os.chdir(ctry_dir)
 
 population_data = os.path.join(dataset_path, "Facebook Dataset")
 tifs = list() # get only the tif files from population data
@@ -90,19 +95,14 @@ for file in os.listdir(population_data):
     if file[-4:] == ".tif":
         tifs.append(file)
 
-outfp = f"{ctry_name}_Population_Estimates.shp"
-not_opened = tifs[:]
+allow_overcounts = True # boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
+                        # If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
 
-if os.path.exists("Population_files_not_opened.txt"):
-    ctry = gpd.read_file(outfp) # in case kernel crashes, keep track of progress
-    with open("Population_files_not_opened.txt",'r') as f:
-        not_opened = f.read().splitlines()
-
-while len(not_opened) > 0:
-    file = not_opened.pop()
+while len(tifs) > 0:
+    file = tifs.pop()
     src = rasterio.open(os.path.join(population_data, file), "r")
     print(f"Opening {file}")
-    #print(src.meta)
+    # print(src.meta)
     transformer = src.meta['transform']
     width = src.meta['width']
     height = src.meta['height']
@@ -135,8 +135,6 @@ while len(not_opened) > 0:
         vals = src.read(1) # 2D population raster data
         print("Getting the population counts...")
 
-        allow_overcounts = True # boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
-                                # If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
         if not allow_overcounts:
             for i,p in overlap_polys:
                 mask = create_mask(p, x, y)
@@ -155,20 +153,25 @@ while len(not_opened) > 0:
                 print(mask.shape, vals.shape)
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
+                del mask
             equalizer_inv[equalizer_inv == 0] = np.inf
+            equalizer = 1/equalizer_inv
+            del equalizer_inv
+            gc.collect()
             for i,mask in poly_masks:
-                pop_count = 1/equalizer_inv * mask * vals.transpose()
+                pop_count = equalizer * mask * vals.transpose()
                 ctry.loc[i,"Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
+            del equalizer
+            del poly_masks
 
         print("All overlapping polygons have been successfully parsed.")
-        # update files with new counts
-        ctry.to_file(outfp)
-        with open("Population_files_not_opened.txt", 'w') as f:
-            f.write("\n".join(not_opened))
-
-# reaching end of while loop means all population files were parsed
-os.remove("Population_files_not_opened.txt")
+        del coords
+        del x
+        del y
+        del vals
+        del overlap_polys
+        gc.collect()
 
 # write results to csv file
 result = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "Population"]]
@@ -176,5 +179,5 @@ result.rename(columns={"ISO_LANGUA": "ISO_639",
                        "COUNTRY_IS": "COUNTRY"})
 # result.to_csv(f"{ctry_name}_Population_Estimates.csv")
 
-# Save the artifact in ClearML
+# Save the artifact in ClearML (which does auto-conversion from df to csv)
 task.upload_artifact(name='Uganda', artifact_object=result)
