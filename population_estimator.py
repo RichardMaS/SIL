@@ -1,12 +1,10 @@
-import time
-
-import clearml
 from clearml import Task, Dataset
+import time
 import numpy as np
 import geopandas as gpd
 import pandas as pd
 import rasterio
-from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, box
+from shapely.geometry import Polygon, MultiPolygon, box
 import shapely.vectorized
 import os
 import gc
@@ -44,6 +42,81 @@ def create_mask(poly, x_coords, y_coords):
         gc.collect()
     return mask_final
 
+def process(file, poly_list, file_dir='', allow_overcounts=True):
+    '''Receives geotiff file as input and returns the sum of values for pixels that overlap with polygons from `poly_list`
+
+    allow_overcounts: boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
+    If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons'''
+
+    src = rasterio.open(os.path.join(file_dir, file), "r")
+    print(f"Opening {file}")
+    # print(src.meta)
+    transformer = src.meta['transform']
+    width = src.meta['width']
+    height = src.meta['height']
+
+    # TODO: get location of raster data and check if it overlaps with any of the language polygons
+    overlap_polys = list()
+    region = box(*src.bounds)
+
+    for i, poly in poly_list:
+        if type(poly) == Polygon:
+            sub_polys = [poly]
+        elif type(poly) == MultiPolygon:
+            sub_polys = list(poly)
+
+        for p in sub_polys:
+            checker = MultiPolygon([p, region])
+            if not checker.is_valid:
+                overlap_polys.append((i,p))
+
+    # If yes: create masks from language polygons and sum over src pixel values with label True
+    if len(overlap_polys) > 0:
+        print(f"{file} overlaps with language polys!")
+        results = list()
+
+        coords = np.indices((width, height)) # image coordinates
+        print("Transforming the coordinates...")
+        x,y = transformer * coords # transform to geo coords
+        print("Reading the raster data...")
+        vals = src.read(1) # 2D population raster data
+        print("Getting the population counts...")
+
+        if not allow_overcounts:
+            for i,p in overlap_polys:
+                mask = create_mask(p, x, y)
+                print(mask.shape, vals.shape)
+                #pop_count = vals.transpose() * mask # element-wise multiplication
+                pop_count = np.extract(mask, vals.transpose())
+                results.append((i, pop_count))
+                print("Yay, I finished one polygon!")
+                del mask
+                gc.collect()
+
+        else:
+            equalizer_inv = np.zeros((width, height))
+            poly_masks = list()
+            for i,p in overlap_polys:
+                # if raster band is too large, split in half and re-merge (repeat until no error raised)
+                mask = create_mask(p, x, y)
+                print(mask.shape, vals.shape)
+                equalizer_inv += mask
+                poly_masks.append((i,mask))
+                del mask
+                gc.collect()
+            equalizer_inv[equalizer_inv == 0] = np.inf
+            equalizer = 1/equalizer_inv
+            del equalizer_inv
+            gc.collect()
+            for i,mask in poly_masks:
+                pop_count = equalizer * mask * vals.transpose()
+                results.append((i, pop_count))
+                print("Yay, I finished one polygon!")
+
+        print("All overlapping polygons have been successfully parsed.")
+        return results
+
+### MAIN METHOD ###
 dataset_name = 'Ethnologue Population Mapping'
 
 # REMOVED: create/upload datasets on ClearML
@@ -72,119 +145,43 @@ task = Task.init(
   auto_connect_streams=True,
 )
 
+# import language polygons into GeoDataFrame
 dataset_path = Dataset.get(dataset_project='Ethnologue_Richard_Internship', dataset_name=dataset_name).get_local_copy()
 fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
 data = gpd.read_file(fp)
 
 ### CHANGE COUNTRY LABELS HERE ###
-ctry_name = "Uganda"
-ctry_abbr = "UGA"
+ctry_name = "Uganda" # full name of country
+ctry_abbr = "UGA" # ISO-3 code of country
 
+# extract only language polygons of the desired country
 grouped = data.groupby("COUNTRY_IS")
 ctry = grouped.get_group(ctry_abbr, data)
-ctry["Population"] = 0
+ctry["Population"] = 0 # add new column to store population estimates
 
 del data
 del grouped
 gc.collect()
 
-# REMOVED: move to country's file directory (or create new folder for country if not already existing)
-# ctry_dir = os.path.join("Countries", ctry_name)
-# if not os.path.exists(ctry_dir):
-#     os.makedirs(ctry_dir)
-# os.chdir(ctry_dir)
-
+# get file paths for population density data
 population_data = os.path.join(dataset_path, "Facebook Dataset")
-tifs = list() # get only the tif files from population data
+tifs = list() # only the .tif files
 for file in os.listdir(population_data):
     if file[-4:] == ".tif":
         tifs.append(file)
 
-allow_overcounts = True # boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
-                        # If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
+poly_list = list(ctry["geometry"].items()) # list of language polygons from country data, with index included
 
-while len(tifs) > 0:
-    file = tifs.pop()
-    src = rasterio.open(os.path.join(population_data, file), "r")
-    print(f"Opening {file}")
-    # print(src.meta)
-    transformer = src.meta['transform']
-    width = src.meta['width']
-    height = src.meta['height']
+# process the data to generate population estimates for each language
+for file in tifs:
+    results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
+    if results is not None:
+        for i, pop_count in results:
+            ctry.loc[i, "Population"] += np.nansum(pop_count)
 
-    # TODO: get location of raster data and check if it overlaps with any of the language polygons
-    overlap_polys = list()
-    region = box(*src.bounds)
-
-    for i in ctry.index.values:
-        poly = ctry.loc[i, "geometry"]
-        if type(poly) == Polygon:
-            poly_list = [poly]
-        elif type(poly) == MultiPolygon:
-            poly_list = list(poly)
-
-        for p in poly_list:
-            checker = MultiPolygon([p, region])
-            if not checker.is_valid:
-                overlap_polys.append((i,p))
-
-    # If yes: create masks from language polygons and sum over src pixel values with label True
-    if len(overlap_polys) > 0:
-        print(f"{file} overlaps with language polys!")
-        # multi_poly = MultiPolygon(list(zip(*overlap_polys))[1])
-
-        coords = np.indices((width, height)) # image coordinates
-        print("Transforming the coordinates...")
-        x,y = transformer * coords # transform to geo coords (this step is REALLY slow!)
-        print("Reading the raster data...")
-        vals = src.read(1) # 2D population raster data
-        print("Getting the population counts...")
-
-        if not allow_overcounts:
-            for i,p in overlap_polys:
-                mask = create_mask(p, x, y)
-                print(mask.shape, vals.shape)
-                #pop_count = vals.transpose() * mask # element-wise multiplication
-                pop_count = np.extract(mask, vals.transpose())
-                ctry.loc[i, "Population"] += np.nansum(pop_count)
-                print("Yay, I finished one polygon!")
-
-        else:
-            equalizer_inv = np.zeros((width, height))
-            poly_masks = list()
-            for i,p in overlap_polys:
-                # if raster band is too large, split in half and re-merge (repeat until no error raised)
-                mask = create_mask(p, x, y)
-                print(mask.shape, vals.shape)
-                equalizer_inv += mask
-                poly_masks.append((i,mask))
-                del mask
-                gc.collect()
-            equalizer_inv[equalizer_inv == 0] = np.inf
-            equalizer = 1/equalizer_inv
-            del equalizer_inv
-            gc.collect()
-            for i,mask in poly_masks:
-                pop_count = equalizer * mask * vals.transpose()
-                ctry.loc[i,"Population"] += np.nansum(pop_count)
-                print("Yay, I finished one polygon!")
-            del equalizer
-            del poly_masks
-            gc.collect()
-
-        print("All overlapping polygons have been successfully parsed.")
-        del coords
-        del x
-        del y
-        del vals
-        del overlap_polys
-        gc.collect()
-
-# write results to csv file
 result = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "Population"]]
 result.rename(columns={"ISO_LANGUA": "ISO_639",
                        "COUNTRY_IS": "COUNTRY"})
-# result.to_csv(f"{ctry_name}_Population_Estimates.csv")
 
 # Save the artifact in ClearML (which does auto-conversion from df to csv)
-task.upload_artifact(name='Uganda', artifact_object=result)
+task.upload_artifact(name=f'{ctry_name}', artifact_object=result)
