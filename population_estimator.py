@@ -159,16 +159,18 @@ while len(tifs) > 0:
                 equalizer_inv += mask
                 poly_masks.append((i,mask))
                 del mask
-            gc.collect()
+                gc.collect()
             equalizer_inv[equalizer_inv == 0] = np.inf
             equalizer = 1/equalizer_inv
             del equalizer_inv
+            gc.collect()
             for i,mask in poly_masks:
                 pop_count = equalizer * mask * vals.transpose()
                 ctry.loc[i,"Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
             del equalizer
             del poly_masks
+            gc.collect()
 
         print("All overlapping polygons have been successfully parsed.")
         del coords
