@@ -1,5 +1,5 @@
 from clearml import Task, Dataset
-import time
+import random
 import numpy as np
 import geopandas as gpd
 import pandas as pd
@@ -111,7 +111,6 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
             for i,mask in poly_masks:
                 pop_count = equalizer * mask * vals.transpose()
                 results.append((i, pop_count))
-                print(np.nansum(pop_count))
                 print("Yay, I finished one polygon!")
 
         print("All overlapping polygons have been successfully parsed.")
@@ -181,6 +180,7 @@ def main():
         task.register_artifact(f'{ctry_name}', ctry)
 
         unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+        random.shuffle(unopened_files)
         del data
         del grouped
         gc.collect()
