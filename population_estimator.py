@@ -138,7 +138,7 @@ dataset_name = 'Ethnologue Population Mapping'
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name=f'{ctry_name} {int(time.time())}', # task name of at least 3 characters
+  task_name=f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
   task_type="data_processing",
   tags=None,
   reuse_last_task_id=True,
@@ -149,15 +149,20 @@ task = Task.init(
   auto_resource_monitoring=True,
   auto_connect_streams=True,
   )
+task.set_base_docker(docker_image="python:3.9.7")
+Task.enqueue(task, queue_name="idx_10gb")
+
+# get local copy of population dataset
 dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
 population_data = os.path.join(dataset_path, "Facebook Dataset")
 
 # check if there is a previous artifact registered
-prev_artifacts = task.get_registered_artifacts()
-
-if len(prev_artifacts) > 0:
-    ctry = prev_artifacts[f'{ctry_name}']
+prev_artifact = task.get_registered_artifacts()
+if len(prev_artifact) > 0:
+    ctry = prev_artifact[f'{ctry_name}']
     unopened_files = task.artifacts["unopened_files"]
+
+# otherwise, initialize new `ctry` dataframe
 else:
     # import language polygon data
     fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
@@ -172,15 +177,17 @@ else:
     ctry.rename(columns={"ISO_LANGUA": "ISO_639",
                          "COUNTRY_IS": "COUNTRY"})
     ctry["Population"] = 0 # add new column to store population estimates
-    task.register_artifact(f'{ctry_name}', ctry)
 
+    task.register_artifact(f'{ctry_name}', ctry)
+    ctry = task.get_registered_artifacts()[f'{ctry_name}']
     unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+
     del data
     del grouped
     gc.collect()
 
-# get list of language polygons from country data, with index included
-try: poly_list = list(ctry["geometry"].items())
+try: # get list of language polygons from country data, with index included
+    poly_list = list(ctry["geometry"].items())
 except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
     print("All files from population density data have been processed.")
 
@@ -194,5 +201,5 @@ for file in unopened_files:
     unopened_files.remove(file)
     task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
 
-# If all .tif files have been processed, remove `geometry` column from final dataframe
+# If all .tif files have been processed, remove `geometry` column from `ctry` dataframe
 ctry.drop("geometry", axis=1, inplace=True)
