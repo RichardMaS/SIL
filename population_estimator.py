@@ -42,14 +42,14 @@ def create_mask(poly, x_coords, y_coords):
         gc.collect()
     return mask_final
 
-def process(file, poly_list, file_dir='', allow_overcounts=True):
+def process(filename, poly_list, file_dir='', allow_overcounts=True):
     '''Receives geotiff file as input and returns the sum of values for pixels that overlap with polygons from `poly_list`
 
     allow_overcounts: boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
     If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons'''
 
-    src = rasterio.open(os.path.join(file_dir, file), "r")
-    print(f"Opening {file}")
+    src = rasterio.open(os.path.join(file_dir, filename), "r")
+    print(f"Opening {filename}")
     # print(src.meta)
     transformer = src.meta['transform']
     width = src.meta['width']
@@ -72,7 +72,7 @@ def process(file, poly_list, file_dir='', allow_overcounts=True):
 
     # If yes: create masks from language polygons and sum over src pixel values with label True
     if len(overlap_polys) > 0:
-        print(f"{file} overlaps with language polys!")
+        print(f"{filename} overlaps with language polys!")
         results = list()
 
         coords = np.indices((width, height)) # image coordinates
@@ -116,12 +116,17 @@ def process(file, poly_list, file_dir='', allow_overcounts=True):
         print("All overlapping polygons have been successfully parsed.")
         return results
 
+### CHANGE COUNTRY LABELS HERE ###
+ctry_name = "Uganda" # full name of country
+ctry_abbr = "UGA" # ISO-3 code of country
+
 ### MAIN METHOD ###
+dataset_project = 'Ethnologue_Richard_Internship'
 dataset_name = 'Ethnologue Population Mapping'
 
-# REMOVED: create/upload datasets on ClearML
+# REMOVED: create/upload dataset onto ClearML
 # dataset = Dataset.create(
-#     dataset_project="Ethnologue_Richard_Internship", dataset_name=dataset_name
+#     dataset_project=dataset_project, dataset_name=dataset_name
 # )
 # num_links = dataset.add_files(path="./Language Polygons/SIL_lang_polys_June2022/", dataset_path="/Language Polygons/")
 # num_links += dataset.add_files(path="./population_af_2018-10-01/", dataset_path="/Facebook Dataset/")
@@ -133,55 +138,64 @@ dataset_name = 'Ethnologue Population Mapping'
 Task.add_requirements("-rrequirements.txt")
 task = Task.init(
   project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name='Uganda' + str(int(time.time())), # task name of at least 3 characters
-  task_type="training",
+  task_name=f'{ctry_name} {int(time.time())}', # task name of at least 3 characters
+  task_type="data_processing",
   tags=None,
   reuse_last_task_id=True,
-  continue_last_task=False,
+  continue_last_task=True,
   output_uri="s3://richard-ethnologue-gis",
   auto_connect_arg_parser=True,
   auto_connect_frameworks=True,
   auto_resource_monitoring=True,
   auto_connect_streams=True,
-)
-
-# import language polygons into GeoDataFrame
-dataset_path = Dataset.get(dataset_project='Ethnologue_Richard_Internship', dataset_name=dataset_name).get_local_copy()
-fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
-data = gpd.read_file(fp)
-
-### CHANGE COUNTRY LABELS HERE ###
-ctry_name = "Uganda" # full name of country
-ctry_abbr = "UGA" # ISO-3 code of country
-
-# extract only language polygons of the desired country
-grouped = data.groupby("COUNTRY_IS")
-ctry = grouped.get_group(ctry_abbr, data)
-ctry["Population"] = 0 # add new column to store population estimates
-
-del data
-del grouped
-gc.collect()
-
-# get file paths for population density data
+  )
+dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
 population_data = os.path.join(dataset_path, "Facebook Dataset")
-tifs = list() # only the .tif files
-for file in os.listdir(population_data):
-    if file[-4:] == ".tif":
-        tifs.append(file)
 
+# check if there are previous artifacts
+prev_artifacts = task.artifacts
+most_recent_index = len(prev_artifacts)
+
+if most_recent_index > 0:
+    most_recent = pd.read_csv(prev_artifacts[f'{ctry_name}_{most_recent_index:02}'])
+    ctry = gpd.GeoDataFrame(most_recent, crs={'init': 'epsg:4326'})
+    del most_recent
+
+else:
+    # import language polygon data
+    fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
+    data = gpd.read_file(fp)
+
+    # extract only language polygons of the desired country
+    grouped = data.groupby("COUNTRY_IS")
+    ctry = grouped.get_group(ctry_abbr, data)
+
+    # keep only the relevant columns
+    ctry = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "geometry"]]
+    ctry.rename(columns={"ISO_LANGUA": "ISO_639",
+                         "COUNTRY_IS": "COUNTRY"})
+
+    # add new column to store all files from the population density data which haven't been processed yet
+    ctry["Unopened_files"] = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+    ctry["Population"] = 0 # add new column to store population estimates
+
+    del data
+    del grouped
+
+gc.collect()
 poly_list = list(ctry["geometry"].items()) # list of language polygons from country data, with index included
 
 # process the data to generate population estimates for each language
-for file in tifs:
+for file in ctry["Unopened_files"]:
     results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
     if results is not None:
         for i, pop_count in results:
             ctry.loc[i, "Population"] += np.nansum(pop_count)
+            most_recent_index += 1
+            # Save the artifact in ClearML (which does auto-conversion from df to csv)
+            task.upload_artifact(name=f'{ctry_name}_{most_recent_index:02}', artifact_object=ctry)
+    ctry["Unopened_files"].remove(file)
 
-result = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "Population"]]
-result.rename(columns={"ISO_LANGUA": "ISO_639",
-                       "COUNTRY_IS": "COUNTRY"})
-
-# Save the artifact in ClearML (which does auto-conversion from df to csv)
-task.upload_artifact(name=f'{ctry_name}', artifact_object=result)
+# If all .tif files have been processed, generate final artifact
+ctry.drop(columns=["Unopened_files", "geometry"])
+task.upload_artifact(name=f'{ctry_name}_final', artifact_object=ctry)
