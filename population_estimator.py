@@ -82,7 +82,7 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
         vals = src.read(1) # 2D population raster data
         print("Getting the population counts...")
 
-        if not allow_overcounts:
+        if allow_overcounts:
             for i,p in overlap_polys:
                 mask = create_mask(p, x, y)
                 print(mask.shape, vals.shape)
@@ -111,6 +111,7 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
             for i,mask in poly_masks:
                 pop_count = equalizer * mask * vals.transpose()
                 results.append((i, pop_count))
+                print(np.nansum(pop_count))
                 print("Yay, I finished one polygon!")
 
         print("All overlapping polygons have been successfully parsed.")
@@ -121,85 +122,86 @@ ctry_name = "Uganda" # full name of country
 ctry_abbr = "UGA" # ISO-3 code of country
 
 ### MAIN METHOD ###
-dataset_project = 'Ethnologue_Richard_Internship'
-dataset_name = 'Ethnologue Population Mapping'
+def main():
+    dataset_project = 'Ethnologue_Richard_Internship'
+    dataset_name = 'Ethnologue Population Mapping'
 
-# REMOVED: create/upload dataset onto ClearML
-# dataset = Dataset.create(
-#     dataset_project=dataset_project, dataset_name=dataset_name
-# )
-# num_links = dataset.add_files(path="./Language Polygons/SIL_lang_polys_June2022/", dataset_path="/Language Polygons/")
-# num_links += dataset.add_files(path="./population_af_2018-10-01/", dataset_path="/Facebook Dataset/")
-# dataset.upload()
-# print(f"Dataset '{dataset_name}' generated, with {num_links} files added.")
-# dataset.finalize()
+    # REMOVED: create/upload dataset onto ClearML
+    # dataset = Dataset.create(
+    #     dataset_project=dataset_project, dataset_name=dataset_name
+    # )
+    # num_links = dataset.add_files(path="./Language Polygons/SIL_lang_polys_June2022/", dataset_path="/Language Polygons/")
+    # num_links += dataset.add_files(path="./population_af_2018-10-01/", dataset_path="/Facebook Dataset/")
+    # dataset.upload()
+    # print(f"Dataset '{dataset_name}' generated, with {num_links} files added.")
+    # dataset.finalize()
 
-# prepare task on ClearML
-Task.add_requirements("-rrequirements.txt")
-task = Task.init(
-  project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-  task_name=f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
-  task_type="data_processing",
-  tags=None,
-  reuse_last_task_id=True,
-  continue_last_task=True,
-  output_uri="s3://richard-ethnologue-gis",
-  auto_connect_arg_parser=True,
-  auto_connect_frameworks=True,
-  auto_resource_monitoring=True,
-  auto_connect_streams=True,
-  )
-task.set_base_docker(docker_image="python:3.9.7")
-Task.enqueue(task, queue_name="idx_10gb")
+    # prepare task on ClearML
+    Task.add_requirements("-rrequirements.txt")
+    task = Task.init(
+      project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
+      task_name=f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
+      task_type="data_processing",
+      tags=None,
+      reuse_last_task_id=True,
+      continue_last_task=True,
+      output_uri="s3://richard-ethnologue-gis",
+      auto_connect_arg_parser=True,
+      auto_connect_frameworks=True,
+      auto_resource_monitoring=True,
+      auto_connect_streams=True,
+      )
+    task.set_base_docker(docker_image="python:3.9.7")
 
-# get local copy of population dataset
-dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
-population_data = os.path.join(dataset_path, "Facebook Dataset")
+    # get local copy of population dataset
+    dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
+    population_data = os.path.join(dataset_path, "Facebook Dataset")
 
-# check if there is a previous artifact registered
-prev_artifact = task.get_registered_artifacts()
-if len(prev_artifact) > 0:
-    ctry = prev_artifact[f'{ctry_name}']
-    unopened_files = task.artifacts["unopened_files"]
+    # check if there is a previous artifact registered
+    prev_artifact = task.get_registered_artifacts()
+    if len(prev_artifact) > 0:
+        ctry = prev_artifact[f'{ctry_name}']
+        unopened_files = task.artifacts["unopened_files"]
 
-# otherwise, initialize new `ctry` dataframe
-else:
-    # import language polygon data
-    fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
-    data = gpd.read_file(fp)
+    # otherwise, initialize new `ctry` dataframe
+    else:
+        # import language polygon data
+        fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
+        data = gpd.read_file(fp)
 
-    # extract only language polygons of the desired country
-    grouped = data.groupby("COUNTRY_IS")
-    ctry = grouped.get_group(ctry_abbr, data)
+        # extract only language polygons of the desired country
+        grouped = data.groupby("COUNTRY_IS")
+        ctry = grouped.get_group(ctry_abbr, data)
 
-    # keep only the relevant columns
-    ctry = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "geometry"]]
-    ctry.rename(columns={"ISO_LANGUA": "ISO_639",
-                         "COUNTRY_IS": "COUNTRY"})
-    ctry["Population"] = 0 # add new column to store population estimates
+        # keep only the relevant columns
+        ctry = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "geometry"]]
+        ctry.rename(columns={"ISO_LANGUA": "ISO_639",
+                             "COUNTRY_IS": "COUNTRY"})
+        ctry["Population"] = 0 # add new column to store population estimates
+        task.register_artifact(f'{ctry_name}', ctry)
 
-    task.register_artifact(f'{ctry_name}', ctry)
-    ctry = task.get_registered_artifacts()[f'{ctry_name}']
-    unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+        unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+        del data
+        del grouped
+        gc.collect()
 
-    del data
-    del grouped
-    gc.collect()
+    try: # get list of language polygons from country data, with index included
+        poly_list = list(ctry["geometry"].items())
+    except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
+        print("All files from population density data have been processed.")
 
-try: # get list of language polygons from country data, with index included
-    poly_list = list(ctry["geometry"].items())
-except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
-    print("All files from population density data have been processed.")
+    # process the data to generate population estimates for each language
+    for file in unopened_files:
+        results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
+        # Save progress in ClearML
+        if results is not None:
+            for i, pop_count in results:
+                ctry.loc[i, "Population"] += np.nansum(pop_count)
+        unopened_files.remove(file)
+        task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
 
-# process the data to generate population estimates for each language
-for file in unopened_files:
-    results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
-    # Save progress in ClearML
-    if results is not None:
-        for i, pop_count in results:
-            ctry.loc[i, "Population"] += np.nansum(pop_count)
-    unopened_files.remove(file)
-    task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
+    # If all .tif files have been processed, remove `geometry` column from `ctry` dataframe
+    ctry.drop("geometry", axis=1, inplace=True)
 
-# If all .tif files have been processed, remove `geometry` column from `ctry` dataframe
-ctry.drop("geometry", axis=1, inplace=True)
+if __name__ == '__main__':
+    main()
