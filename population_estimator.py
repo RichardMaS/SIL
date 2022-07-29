@@ -152,15 +152,12 @@ task = Task.init(
 dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
 population_data = os.path.join(dataset_path, "Facebook Dataset")
 
-# check if there are previous artifacts
-prev_artifacts = task.artifacts
-most_recent_index = len(prev_artifacts)
+# check if there is a previous artifact registered
+prev_artifacts = task.get_registered_artifacts()
 
-if most_recent_index > 0:
-    most_recent = pd.read_csv(prev_artifacts[f'{ctry_name}_{most_recent_index:02}'])
-    ctry = gpd.GeoDataFrame(most_recent, crs={'init': 'epsg:4326'})
-    del most_recent
-
+if len(prev_artifacts) > 0:
+    ctry = prev_artifacts[f'{ctry_name}']
+    unopened_files = task.artifacts["unopened_files"]
 else:
     # import language polygon data
     fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
@@ -174,28 +171,28 @@ else:
     ctry = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "geometry"]]
     ctry.rename(columns={"ISO_LANGUA": "ISO_639",
                          "COUNTRY_IS": "COUNTRY"})
-
-    # add new column to store all files from the population density data which haven't been processed yet
-    ctry["Unopened_files"] = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
     ctry["Population"] = 0 # add new column to store population estimates
+    task.register_artifact(f'{ctry_name}', ctry)
 
+    unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
     del data
     del grouped
+    gc.collect()
 
-gc.collect()
-poly_list = list(ctry["geometry"].items()) # list of language polygons from country data, with index included
+# get list of language polygons from country data, with index included
+try: poly_list = list(ctry["geometry"].items())
+except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
+    print("All files from population density data have been processed.")
 
 # process the data to generate population estimates for each language
-for file in ctry["Unopened_files"]:
+for file in unopened_files:
     results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
+    # Save progress in ClearML
     if results is not None:
         for i, pop_count in results:
             ctry.loc[i, "Population"] += np.nansum(pop_count)
-            most_recent_index += 1
-            # Save the artifact in ClearML (which does auto-conversion from df to csv)
-            task.upload_artifact(name=f'{ctry_name}_{most_recent_index:02}', artifact_object=ctry)
-    ctry["Unopened_files"].remove(file)
+    unopened_files.remove(file)
+    task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
 
-# If all .tif files have been processed, generate final artifact
-ctry.drop(columns=["Unopened_files", "geometry"])
-task.upload_artifact(name=f'{ctry_name}_final', artifact_object=ctry)
+# If all .tif files have been processed, remove `geometry` column from final dataframe
+ctry.drop("geometry", axis=1, inplace=True)
