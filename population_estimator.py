@@ -42,8 +42,8 @@ def create_mask(poly, x_coords, y_coords):
         gc.collect()
     return mask_final
 
-def process(filename, poly_list, file_dir='', allow_overcounts=True):
-    '''Receives geotiff file as input and returns the sum of values for pixels that overlap with polygons from `poly_list`
+def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
+    '''Receives geotiff file as input and updates the population counts in `gdf` for any overlaps with polygons from `poly_list`
 
     allow_overcounts: boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
     If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons'''
@@ -73,7 +73,6 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
     # If yes: create masks from language polygons and sum over src pixel values with label True
     if len(overlap_polys) > 0:
         print(f"{filename} overlaps with language polys!")
-        results = list()
 
         coords = np.indices((width, height)) # image coordinates
         print("Transforming the coordinates...")
@@ -88,7 +87,7 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
                 print(mask.shape, vals.shape)
                 #pop_count = vals.transpose() * mask # element-wise multiplication
                 pop_count = np.extract(mask, vals.transpose())
-                results.append((i, pop_count))
+                gdf.loc[i, "Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
                 del mask
                 gc.collect()
@@ -110,11 +109,10 @@ def process(filename, poly_list, file_dir='', allow_overcounts=True):
             gc.collect()
             for i,mask in poly_masks:
                 pop_count = equalizer * mask * vals.transpose()
-                results.append((i, pop_count))
+                gdf.loc[i, "Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
 
         print("All overlapping polygons have been successfully parsed.")
-        return results
 
 ### CHANGE COUNTRY LABELS HERE ###
 ctry_name = "Uganda" # full name of country
@@ -151,6 +149,7 @@ def main():
       auto_connect_streams=True,
       )
     task.set_base_docker(docker_image="python:3.9.7")
+    task.execute_remotely(queue_name="idx_10gb")
 
     # get local copy of population dataset
     dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
@@ -179,8 +178,10 @@ def main():
         ctry["Population"] = 0 # add new column to store population estimates
         task.register_artifact(f'{ctry_name}', ctry)
 
+        # initialize list of .tif files from population data in randomized order
         unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
         random.shuffle(unopened_files)
+
         del data
         del grouped
         gc.collect()
@@ -192,11 +193,8 @@ def main():
 
     # process the data to generate population estimates for each language
     for file in unopened_files:
-        results = process(file, poly_list, file_dir=population_data, allow_overcounts=False)
+        process(file, poly_list, ctry, file_dir=population_data, allow_overcounts=False)
         # Save progress in ClearML
-        if results is not None:
-            for i, pop_count in results:
-                ctry.loc[i, "Population"] += np.nansum(pop_count)
         unopened_files.remove(file)
         task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
 
