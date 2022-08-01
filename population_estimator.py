@@ -7,7 +7,12 @@ import rasterio
 from shapely.geometry import Polygon, MultiPolygon, box
 import shapely.vectorized
 import os
+import sys
 import gc
+
+### CHANGE COUNTRY LABELS HERE ###
+ctry_name = "Algeria" # full name of country
+ctry_abbr = "DZA" # ISO-3 code of country
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -114,18 +119,15 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
 
         print("All overlapping polygons have been successfully parsed.")
 
-### CHANGE COUNTRY LABELS HERE ###
-ctry_name = "Uganda" # full name of country
-ctry_abbr = "UGA" # ISO-3 code of country
-
 ### MAIN METHOD ###
 def main():
-    dataset_project = 'Ethnologue_Richard_Internship'
+    project_name = 'Ethnologue_Richard_Internship'
     dataset_name = 'Ethnologue Population Mapping'
+    task_name = f'{ctry_name}_Population_Estimates'
 
     # REMOVED: create/upload dataset onto ClearML
     # dataset = Dataset.create(
-    #     dataset_project=dataset_project, dataset_name=dataset_name
+    #     dataset_project=project_name, dataset_name=dataset_name
     # )
     # num_links = dataset.add_files(path="./Language Polygons/SIL_lang_polys_June2022/", dataset_path="/Language Polygons/")
     # num_links += dataset.add_files(path="./population_af_2018-10-01/", dataset_path="/Facebook Dataset/")
@@ -136,12 +138,12 @@ def main():
     # prepare task on ClearML
     Task.add_requirements("-rrequirements.txt")
     task = Task.init(
-      project_name='Ethnologue_Richard_Internship',    # project name of at least 3 characters
-      task_name=f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
+      project_name=project_name,    # project name of at least 3 characters
+      task_name=task_name, # task name of at least 3 characters
       task_type="data_processing",
       tags=None,
-      reuse_last_task_id=True,
-      continue_last_task=True,
+      reuse_last_task_id=False,
+      continue_last_task=False,
       output_uri="s3://richard-ethnologue-gis",
       auto_connect_arg_parser=True,
       auto_connect_frameworks=True,
@@ -152,17 +154,18 @@ def main():
     task.execute_remotely(queue_name="idx_10gb")
 
     # get local copy of population dataset
-    dataset_path = Dataset.get(dataset_project=dataset_project, dataset_name=dataset_name).get_local_copy()
+    dataset_path = Dataset.get(dataset_project=project_name, dataset_name=dataset_name).get_local_copy()
     population_data = os.path.join(dataset_path, "Facebook Dataset")
 
-    # check if there is a previous artifact registered
-    prev_artifact = task.get_registered_artifacts()
-    if len(prev_artifact) > 0:
-        ctry = prev_artifact[f'{ctry_name}']
-        unopened_files = task.artifacts["unopened_files"]
+    try: # check if there is a previous artifact registered
+        prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
+                                   task_filter={'order_by': ['-last_update']})[0]
+        ctry = prev_task.get_registered_artifacts()[f'{ctry_name}']
+        unopened_files = list(prev_task.artifacts["unopened_files"])
+        print(f"Picking up from {len(unopened_files)} unopened file(s)")
 
     # otherwise, initialize new `ctry` dataframe
-    else:
+    except (IndexError, KeyError):
         # import language polygon data
         fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
         data = gpd.read_file(fp)
@@ -176,7 +179,6 @@ def main():
         ctry.rename(columns={"ISO_LANGUA": "ISO_639",
                              "COUNTRY_IS": "COUNTRY"})
         ctry["Population"] = 0 # add new column to store population estimates
-        task.register_artifact(f'{ctry_name}', ctry)
 
         # initialize list of .tif files from population data in randomized order
         unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
@@ -188,14 +190,15 @@ def main():
 
     try: # get list of language polygons from country data, with index included
         poly_list = list(ctry["geometry"].items())
+        task.register_artifact(f'{ctry_name}', ctry)
     except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
-        print("All files from population density data have been processed.")
+        sys.exit("All files from population density data have been processed.")
 
     # process the data to generate population estimates for each language
-    for file in unopened_files:
+    while len(unopened_files) > 0:
+        file = unopened_files.pop()
         process(file, poly_list, ctry, file_dir=population_data, allow_overcounts=False)
         # Save progress in ClearML
-        unopened_files.remove(file)
         task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
 
     # If all .tif files have been processed, remove `geometry` column from `ctry` dataframe
@@ -203,3 +206,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    sys.exit(0)
