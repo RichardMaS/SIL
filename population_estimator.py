@@ -11,8 +11,8 @@ import sys
 import gc
 
 ### CHANGE COUNTRY LABELS HERE ###
-ctry_name = "Algeria" # full name of country
-ctry_abbr = "DZA" # ISO-3 code of country
+ctry_name = "Congo" # full name of country
+ctry_abbr = "COD" # ISO-3 code of country
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -76,7 +76,7 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
                 overlap_polys.append((i,p))
 
     # If yes: create masks from language polygons and sum over src pixel values with label True
-    if len(overlap_polys) > 0:
+    if len(overlap_polys) > 2:
         print(f"{filename} overlaps with language polys!")
 
         coords = np.indices((width, height)) # image coordinates
@@ -103,16 +103,22 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
             for i,p in overlap_polys:
                 # if raster band is too large, split in half and re-merge (repeat until no error raised)
                 mask = create_mask(p, x, y)
-                print(mask.shape, vals.shape)
                 equalizer_inv += mask
-                poly_masks.append((i,mask))
+                if len(overlap_polys) > 100: # cap at 100 polygons to prevent process from running out of memory
+                    print(mask.shape, vals.shape)
+                    poly_masks.append((i,mask))
                 del mask
                 gc.collect()
             equalizer_inv[equalizer_inv == 0] = np.inf
             equalizer = 1/equalizer_inv
             del equalizer_inv
             gc.collect()
-            for i,mask in poly_masks:
+            for j in range(len(overlap_polys)):
+                if len(overlap_polys) > 100:
+                    i,p = overlap_polys[j]
+                    mask = create_mask(p, x, y)
+                    print(mask.shape, vals.shape)
+                else: i,mask = poly_masks[j]
                 pop_count = equalizer * mask * vals.transpose()
                 gdf.loc[i, "Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
