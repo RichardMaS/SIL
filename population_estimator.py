@@ -165,54 +165,53 @@ def main():
     dataset_path = Dataset.get(dataset_project=project_name, dataset_name=dataset_name).get_local_copy()
     population_data = os.path.join(dataset_path, "Facebook Dataset")
 
-    try: # check if there is a previous artifact registered
+    # import language polygon data
+    fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
+    data = gpd.read_file(fp)
+
+    # extract only language polygons of the desired country
+    grouped = data.groupby("COUNTRY_IS")
+    ctry = grouped.get_group(ctry_abbr, data)
+
+    try: # check if there is a previously run task for which to continue progress
         prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
                                    task_filter={'order_by': ['-last_update']})[1]
-        ctry_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
+        results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
         files_url = prev_task.artifacts["unopened_files"].get_local_copy()
-        ctry = gpd.GeoDataFrame(pd.read_csv(ctry_url, compression='gzip'))
+        results = gpd.GeoDataFrame(pd.read_csv(results_url, compression='gzip'))
         unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
-        print(f"Picking up from {len(unopened_files)} unopened file(s)")
 
-    # otherwise, initialize new `ctry` dataframe
+        if len(unopened_files) == 0: # exit process if execution was already completed
+            sys.exit("All files from population density data have been processed.")
+        else: # otherwise, continue executing process on remaining .tif files
+            print(f"Picking up from {len(unopened_files)} unopened file(s)")
+
+    # if no previous task found, initialize new `results` dataframe
     except IndexError:
-        # import language polygon data
-        fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
-        data = gpd.read_file(fp)
-
-        # extract only language polygons of the desired country
-        grouped = data.groupby("COUNTRY_IS")
-        ctry = grouped.get_group(ctry_abbr, data)
-
         # keep only the relevant columns
-        ctry = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS", "geometry"]]
-        ctry.rename(columns={"ISO_LANGUA": "ISO_639",
+        results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
+        results.rename(columns={"ISO_LANGUA": "ISO_639",
                              "COUNTRY_IS": "COUNTRY"})
-        ctry["Population"] = 0 # add new column to store population estimates
+        results["Population"] = 0 # add new column to store population estimates
 
         # initialize list of .tif files from population data in randomized order
         unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
         random.shuffle(unopened_files)
 
-        del data
-        del grouped
-        gc.collect()
+    task.register_artifact(f'{ctry_name}', results)
+    poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
 
-    try: # get list of language polygons from country data, with index included
-        poly_list = list(ctry["geometry"].items())
-        task.register_artifact(f'{ctry_name}', ctry)
-    except KeyError: # another way to check that process is completed is to see whether len(unopened_files) == 0
-        sys.exit("All files from population density data have been processed.")
+    del data
+    del grouped
+    del ctry
+    gc.collect()
 
     # process the data to generate population estimates for each language
     while len(unopened_files) > 0:
         file = unopened_files.pop()
-        process(file, poly_list, ctry, file_dir=population_data, allow_overcounts=False)
+        process(file, poly_list, results, file_dir=population_data, allow_overcounts=False)
         # Save progress in ClearML
         task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
-
-    # If all .tif files have been processed, remove `geometry` column from `ctry` dataframe
-    ctry.drop("geometry", axis=1, inplace=True)
 
 if __name__ == '__main__':
     main()
