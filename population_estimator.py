@@ -1,14 +1,16 @@
 from clearml import Task, Dataset
 import random
+import pickle
+import os
+import sys
+import gc
+
 import numpy as np
 import geopandas as gpd
 import pandas as pd
 import rasterio
 from shapely.geometry import Polygon, MultiPolygon, box
 import shapely.vectorized
-import os
-import sys
-import gc
 
 ### CHANGE COUNTRY LABELS HERE ###
 ctry_name = "Congo" # full name of country
@@ -165,13 +167,15 @@ def main():
 
     try: # check if there is a previous artifact registered
         prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
-                                   task_filter={'order_by': ['-last_update']})[0]
-        ctry = prev_task.get_registered_artifacts()[f'{ctry_name}']
-        unopened_files = list(prev_task.artifacts["unopened_files"])
+                                   task_filter={'order_by': ['-last_update']})[1]
+        ctry_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
+        files_url = prev_task.artifacts["unopened_files"].get_local_copy()
+        ctry = gpd.GeoDataFrame(pd.read_csv(ctry_url, compression='gzip'))
+        unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
         print(f"Picking up from {len(unopened_files)} unopened file(s)")
 
     # otherwise, initialize new `ctry` dataframe
-    except (IndexError, KeyError):
+    except IndexError:
         # import language polygon data
         fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
         data = gpd.read_file(fp)
