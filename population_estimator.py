@@ -49,11 +49,13 @@ def create_mask(poly, x_coords, y_coords):
         gc.collect()
     return mask_final
 
-def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
-    '''Receives geotiff file as input and updates the population counts in `gdf` for any overlaps with polygons from `poly_list`
+def process(filename, poly_list, df, file_dir='', allow_overcounts=True, memory_limit=100):
+    '''Receives geotiff file as input and updates the population counts in `df` for any overlaps with polygons from `poly_list`
 
-    allow_overcounts: boolean parameter to allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
-    If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons'''
+    allow_overcounts (bool): allow double-counting for overlapping polygons, i.e. each person counts as 1 for every polygon
+    If set to False, then for each pixel where >1 polygons overlap, its value will be equally distributed among those polygons
+
+    memory_limit (int): max number of polygons whose regional masks can be stored internally to avoid allocating too much memory, default 100'''
 
     src = rasterio.open(os.path.join(file_dir, filename), "r")
     print(f"Opening {filename}")
@@ -62,23 +64,12 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
     width = src.meta['width']
     height = src.meta['height']
 
-    # TODO: get location of raster data and check if it overlaps with any of the language polygons
-    overlap_polys = list()
+    # get location of raster data and check if it overlaps with any of the language polygons
     region = box(*src.bounds)
-
-    for i, poly in poly_list:
-        if type(poly) == Polygon:
-            sub_polys = [poly]
-        elif type(poly) == MultiPolygon:
-            sub_polys = list(poly)
-
-        for p in sub_polys:
-            checker = MultiPolygon([p, region])
-            if not checker.is_valid:
-                overlap_polys.append((i,p))
+    overlap_polys = [item for item in poly_list if not MultiPolygon([item[1], region]).is_valid]
 
     # If yes: create masks from language polygons and sum over src pixel values with label True
-    if len(overlap_polys) > 2:
+    if len(overlap_polys) > 0:
         print(f"{filename} overlaps with language polys!")
 
         coords = np.indices((width, height)) # image coordinates
@@ -94,7 +85,7 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
                 print(mask.shape, vals.shape)
                 #pop_count = vals.transpose() * mask # element-wise multiplication
                 pop_count = np.extract(mask, vals.transpose())
-                gdf.loc[i, "Population"] += np.nansum(pop_count)
+                df.loc[i, "Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
                 del mask
                 gc.collect()
@@ -106,7 +97,7 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
                 # if raster band is too large, split in half and re-merge (repeat until no error raised)
                 mask = create_mask(p, x, y)
                 equalizer_inv += mask
-                if len(overlap_polys) > 100: # cap at 100 polygons to prevent process from running out of memory
+                if not len(overlap_polys) > memory_limit: # cap number of masks stored in list to prevent process from running out of memory
                     print(mask.shape, vals.shape)
                     poly_masks.append((i,mask))
                 del mask
@@ -116,13 +107,13 @@ def process(filename, poly_list, gdf, file_dir='', allow_overcounts=True):
             del equalizer_inv
             gc.collect()
             for j in range(len(overlap_polys)):
-                if len(overlap_polys) > 100:
+                if len(overlap_polys) > memory_limit:
                     i,p = overlap_polys[j]
                     mask = create_mask(p, x, y)
                     print(mask.shape, vals.shape)
                 else: i,mask = poly_masks[j]
                 pop_count = equalizer * mask * vals.transpose()
-                gdf.loc[i, "Population"] += np.nansum(pop_count)
+                df.loc[i, "Population"] += np.nansum(pop_count)
                 print("Yay, I finished one polygon!")
 
         print("All overlapping polygons have been successfully parsed.")
@@ -173,12 +164,26 @@ def main():
     grouped = data.groupby("COUNTRY_IS")
     ctry = grouped.get_group(ctry_abbr, data)
 
+    # separate MultiPolygons into individual Polygons
+    for i,poly in ctry.geometry.items():
+        if isinstance(poly, MultiPolygon):
+            original = ctry.loc[i]
+            sub_polys = list(poly)
+            for p in sub_polys:
+                new = original.copy()
+                new["geometry"] = p
+                ctry.append(new)
+            ctry.drop(index=i, inplace=True) # delete original row
+
+    ctry.reset_index(drop=True, inplace=True)
+    poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
+
     try: # check if there is a previously run task for which to continue progress
         prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
                                    task_filter={'order_by': ['-last_update']})[1]
         results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
         files_url = prev_task.artifacts["unopened_files"].get_local_copy()
-        results = gpd.GeoDataFrame(pd.read_csv(results_url, compression='gzip'))
+        results = pd.read_csv(results_url, compression='gzip')
         unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
 
         if len(unopened_files) == 0: # exit process if execution was already completed
@@ -190,17 +195,15 @@ def main():
     except IndexError:
         # keep only the relevant columns
         results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
-        results.rename(columns={"ISO_LANGUA": "ISO_639",
-                             "COUNTRY_IS": "COUNTRY"})
+        results.rename(columns={"ISO_LANGUA": "ISO_639", "COUNTRY_IS": "COUNTRY"}, inplace=True)
+        results["Centroid"] = [p.centroid for p in poly_list] # identify polygons by their centroid
         results["Population"] = 0 # add new column to store population estimates
 
         # initialize list of .tif files from population data in randomized order
         unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
         random.shuffle(unopened_files)
 
-    task.register_artifact(f'{ctry_name}', results)
-    poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
-
+    task.register_artifact(name=f'{ctry_name}', artifact=results)
     del data
     del grouped
     del ctry
@@ -212,6 +215,10 @@ def main():
         process(file, poly_list, results, file_dir=population_data, allow_overcounts=False)
         # Save progress in ClearML
         task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
+
+    # If all .tif files have been processed, generate aggregate data to show total population counts for each language
+    aggregate = results.groupby(["ETH_LG_R", "ETH_NO", "ISO_639", "COUNTRY"]).sum().reset_index()
+    task.upload_artifact(name=f'{ctry_name}_Totals', artifact_object=aggregate)
 
 if __name__ == '__main__':
     main()
