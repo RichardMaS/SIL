@@ -11,10 +11,7 @@ import pandas as pd
 import rasterio
 from shapely.geometry import Polygon, MultiPolygon, box
 import shapely.vectorized
-
-### CHANGE COUNTRY LABELS HERE ###
-ctry_name = "Congo" # full name of country
-ctry_abbr = "COD" # ISO-3 code of country
+import pycountry
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -120,6 +117,13 @@ def process(filename, poly_list, df, file_dir='', allow_overcounts=True, memory_
 
 ### MAIN METHOD ###
 def main():
+    if len(sys.argv) not in range(2,4): # requires 2-3 command line args
+        sys.exit("USAGE: python3 population_estimator.py [-r] ISO-alpha-3-country-code")
+
+    ctry_abbr = sys.argv[-1] # input ISO-3 code of country
+    ctry_name = "Sao_Tome_e_Principe"
+    #ctry_name = pycountry.countries.get(alpha_3=ctry_abbr).name # full name of country
+
     project_name = 'Ethnologue_Richard_Internship'
     dataset_name = 'Ethnologue Population Mapping'
     task_name = f'{ctry_name}_Population_Estimates'
@@ -164,16 +168,15 @@ def main():
     grouped = data.groupby("COUNTRY_IS")
     ctry = grouped.get_group(ctry_abbr, data)
 
-    # separate MultiPolygons into individual Polygons
     for i,poly in ctry.geometry.items():
         if isinstance(poly, MultiPolygon):
             original = ctry.loc[i]
+            ctry.drop(index=i, inplace=True) # delete original row
             sub_polys = list(poly)
             for p in sub_polys:
                 new = original.copy()
                 new["geometry"] = p
-                ctry.append(new)
-            ctry.drop(index=i, inplace=True) # delete original row
+                ctry = ctry.append(new)
 
     ctry.reset_index(drop=True, inplace=True)
     poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
@@ -181,6 +184,9 @@ def main():
     try: # check if there is a previously run task for which to continue progress
         prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
                                    task_filter={'order_by': ['-last_update']})[1]
+        # or restart execution if there is a force overwrite
+        if sys.argv[-2] == "-r": raise(IndexError)
+
         results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
         files_url = prev_task.artifacts["unopened_files"].get_local_copy()
         results = pd.read_csv(results_url, compression='gzip')
@@ -191,12 +197,12 @@ def main():
         else: # otherwise, continue executing process on remaining .tif files
             print(f"Picking up from {len(unopened_files)} unopened file(s)")
 
-    # if no previous task found, initialize new `results` dataframe
-    except IndexError:
+    # if no previous task or no artifacts found, initialize new `results` dataframe
+    except (KeyError, IndexError):
         # keep only the relevant columns
         results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
         results.rename(columns={"ISO_LANGUA": "ISO_639", "COUNTRY_IS": "COUNTRY"}, inplace=True)
-        results["Centroid"] = [p.centroid for p in poly_list] # identify polygons by their centroid
+        results["Centroid"] = [p.centroid for i,p in poly_list] # identify polygons by their centroid
         results["Population"] = 0 # add new column to store population estimates
 
         # initialize list of .tif files from population data in randomized order
