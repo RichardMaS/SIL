@@ -1,17 +1,7 @@
 from clearml import Task, Dataset
-import random
-import pickle
-import os
 import sys
-import gc
-
-import numpy as np
-import geopandas as gpd
-import pandas as pd
-import rasterio
-from shapely.geometry import Polygon, MultiPolygon, box
-import shapely.vectorized
-import pycountry
+import subprocess
+from argpase import ArgumentParser
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -117,16 +107,20 @@ def process(filename, poly_list, df, file_dir='', allow_overcounts=True, memory_
 
 ### MAIN METHOD ###
 def main():
-    if len(sys.argv) not in range(2,4): # requires 2-3 command line args
-        sys.exit("USAGE: python3 population_estimator.py [-r] ISO-alpha-3-country-code")
+    if len(sys.argv) != 2: # requires exactly two command line args
+        sys.exit("USAGE: python3.9 population_estimator.py ISO-alpha-3-country-code")
+    ctry_abbr = sys.argv[1] # input ISO-3 code of country
 
-    ctry_abbr = sys.argv[-1] # input ISO-3 code of country
-    ctry_name = "Sao_Tome_e_Principe"
-    #ctry_name = pycountry.countries.get(alpha_3=ctry_abbr).name # full name of country
+    parser = ArgumentParser()
+    parser.add_argument("ctry_abbr", type=str, required=True)
+    parser.parse_args([ctry_abbr])
 
-    project_name = 'Ethnologue_Richard_Internship'
-    dataset_name = 'Ethnologue Population Mapping'
-    task_name = f'{ctry_name}_Population_Estimates'
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pycountry'])
+    ctry_name = pycountry.countries.get(alpha_3=ctry_abbr).name # full name of country
+
+    project_name = 'Ethnologue_Richard_Internship' # project name of at least 3 characters
+    dataset_name = 'Ethnologue Population Mapping' # dataset name of at least 3 characters
+    task_name = f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
 
     # REMOVED: create/upload dataset onto ClearML
     # dataset = Dataset.create(
@@ -141,8 +135,8 @@ def main():
     # prepare task on ClearML
     Task.add_requirements("-rrequirements.txt")
     task = Task.init(
-      project_name=project_name,    # project name of at least 3 characters
-      task_name=task_name, # task name of at least 3 characters
+      project_name=project_name,
+      task_name=task_name,
       task_type="data_processing",
       tags=None,
       reuse_last_task_id=False,
@@ -168,6 +162,7 @@ def main():
     grouped = data.groupby("COUNTRY_IS")
     ctry = grouped.get_group(ctry_abbr, data)
 
+    # separate MultiPolygons into individual Polygons
     for i,poly in ctry.geometry.items():
         if isinstance(poly, MultiPolygon):
             original = ctry.loc[i]
@@ -184,21 +179,16 @@ def main():
     try: # check if there is a previously run task for which to continue progress
         prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
                                    task_filter={'order_by': ['-last_update']})[1]
-        # or restart execution if there is a force overwrite
-        if sys.argv[-2] == "-r": raise(IndexError)
-
         results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
         files_url = prev_task.artifacts["unopened_files"].get_local_copy()
         results = pd.read_csv(results_url, compression='gzip')
-        unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
 
-        if len(unopened_files) == 0: # exit process if execution was already completed
-            sys.exit("All files from population density data have been processed.")
-        else: # otherwise, continue executing process on remaining .tif files
-            print(f"Picking up from {len(unopened_files)} unopened file(s)")
+        # continue executing process on remaining .tif files if any exist
+        unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
+        print(f"Picking up from {len(unopened_files)} unopened file(s)")
 
     # if no previous task or no artifacts found, initialize new `results` dataframe
-    except (KeyError, IndexError):
+    except (IndexError, KeyError, IsADirectoryError):
         # keep only the relevant columns
         results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
         results.rename(columns={"ISO_LANGUA": "ISO_639", "COUNTRY_IS": "COUNTRY"}, inplace=True)
@@ -226,6 +216,6 @@ def main():
     aggregate = results.groupby(["ETH_LG_R", "ETH_NO", "ISO_639", "COUNTRY"]).sum().reset_index()
     task.upload_artifact(name=f'{ctry_name}_Totals', artifact_object=aggregate)
 
+
 if __name__ == '__main__':
     main()
-    sys.exit(0)
