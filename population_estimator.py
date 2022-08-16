@@ -1,7 +1,19 @@
+from argparse import ArgumentParser
 from clearml import Task, Dataset
+
 import sys
-import subprocess
-from argpase import ArgumentParser
+import random
+import pickle
+import os
+import gc
+
+import numpy as np
+import geopandas as gpd
+import pandas as pd
+import rasterio
+from shapely.geometry import Polygon, MultiPolygon, box
+import shapely.vectorized
+import pycountry
 
 def create_mask(poly, x_coords, y_coords):
     '''Returns mask created from Polygon `poly` and coordinates `x_coords`, `y_coords`
@@ -52,8 +64,18 @@ def process(filename, poly_list, df, file_dir='', allow_overcounts=True, memory_
     height = src.meta['height']
 
     # get location of raster data and check if it overlaps with any of the language polygons
+    overlap_polys = list()
     region = box(*src.bounds)
-    overlap_polys = [item for item in poly_list if not MultiPolygon([item[1], region]).is_valid]
+
+    for i, poly in poly_list:
+        if type(poly) == Polygon:
+            sub_polys = [poly]
+        elif type(poly) == MultiPolygon:
+            sub_polys = list(poly)
+
+        for p in sub_polys:
+            if not MultiPolygon([p, region]).is_valid:
+                overlap_polys.append((i,p))
 
     # If yes: create masks from language polygons and sum over src pixel values with label True
     if len(overlap_polys) > 0:
@@ -107,20 +129,68 @@ def process(filename, poly_list, df, file_dir='', allow_overcounts=True, memory_
 
 ### MAIN METHOD ###
 def main():
-    if len(sys.argv) != 2: # requires exactly two command line args
-        sys.exit("USAGE: python3.9 population_estimator.py ISO-alpha-3-country-code")
-    ctry_abbr = sys.argv[1] # input ISO-3 code of country
+    ctry_abbr = Task.current_task().get_parameter("Args/ctry_abbr") # recover command-line arg from hyperparams
+    ctry_name = pycountry.countries.get(alpha_3=ctry_abbr).name
 
-    parser = ArgumentParser()
-    parser.add_argument("ctry_abbr", type=str, required=True)
-    parser.parse_args([ctry_abbr])
+    # get local copy of population dataset
+    dataset_path = Dataset.get(dataset_project=project_name, dataset_name=dataset_name).get_local_copy()
+    population_data = os.path.join(dataset_path, "Facebook Dataset")
 
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pycountry'])
-    ctry_name = pycountry.countries.get(alpha_3=ctry_abbr).name # full name of country
+    # import language polygon data
+    fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
+    data = gpd.read_file(fp)
 
+    # extract only language polygons of the desired country
+    grouped = data.groupby("COUNTRY_IS")
+    ctry = grouped.get_group(ctry_abbr, data)
+
+    try: # check if there is a previously run task for which to continue progress
+        prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
+                                   task_filter={'order_by': ['-last_update']})[1]
+        results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
+        files_url = prev_task.artifacts["unopened_files"].get_local_copy()
+        results = pd.read_csv(results_url, compression='gzip')
+
+        # continue executing process on remaining .tif files if any exist
+        unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
+        print(f"Picking up from {len(unopened_files)} unopened file(s)")
+
+    # if no previous task or no artifacts found, initialize new `results` dataframe
+    except (IndexError, KeyError, IsADirectoryError):
+        # keep only the relevant columns
+        results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
+        results.rename(columns={"ISO_LANGUA": "ISO_639", "COUNTRY_IS": "COUNTRY"}, inplace=True)
+        results["Population"] = 0 # add new column to store population estimates
+
+        # initialize list of .tif files from population data in randomized order
+        unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
+        random.shuffle(unopened_files)
+
+    task.register_artifact(name=f'{ctry_name}', artifact=results)
+    poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
+
+    del data
+    del grouped
+    del ctry
+    gc.collect()
+
+    # process the data to generate population estimates for each language
+    while len(unopened_files) > 0:
+        file = unopened_files.pop()
+        process(file, poly_list, results, file_dir=population_data, allow_overcounts=False)
+        # Save progress in ClearML
+        task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
+
+
+if __name__ == '__main__':
     project_name = 'Ethnologue_Richard_Internship' # project name of at least 3 characters
     dataset_name = 'Ethnologue Population Mapping' # dataset name of at least 3 characters
-    task_name = f'{ctry_name}_Population_Estimates', # task name of at least 3 characters
+    task_name = 'Population_Estimator' # task name of at least 3 characters
+
+    # parse ISO alpha-3 country code as command line argument
+    parser = ArgumentParser()
+    parser.add_argument("ctry_abbr", type=str, metavar="ISO-alpha-3-country-code")
+    args = parser.parse_args()
 
     # REMOVED: create/upload dataset onto ClearML
     # dataset = Dataset.create(
@@ -149,73 +219,4 @@ def main():
       )
     task.set_base_docker(docker_image="python:3.9.7")
     task.execute_remotely(queue_name="idx_10gb")
-
-    # get local copy of population dataset
-    dataset_path = Dataset.get(dataset_project=project_name, dataset_name=dataset_name).get_local_copy()
-    population_data = os.path.join(dataset_path, "Facebook Dataset")
-
-    # import language polygon data
-    fp = os.path.join(dataset_path, "Language Polygons/SIL_lang_polys_June2022.shp")
-    data = gpd.read_file(fp)
-
-    # extract only language polygons of the desired country
-    grouped = data.groupby("COUNTRY_IS")
-    ctry = grouped.get_group(ctry_abbr, data)
-
-    # separate MultiPolygons into individual Polygons
-    for i,poly in ctry.geometry.items():
-        if isinstance(poly, MultiPolygon):
-            original = ctry.loc[i]
-            ctry.drop(index=i, inplace=True) # delete original row
-            sub_polys = list(poly)
-            for p in sub_polys:
-                new = original.copy()
-                new["geometry"] = p
-                ctry = ctry.append(new)
-
-    ctry.reset_index(drop=True, inplace=True)
-    poly_list = list(ctry["geometry"].items()) # get list of language polygons from country data, with index included
-
-    try: # check if there is a previously run task for which to continue progress
-        prev_task = Task.get_tasks(project_name=project_name, task_name=task_name,
-                                   task_filter={'order_by': ['-last_update']})[1]
-        results_url = prev_task.artifacts[f'{ctry_name}'].get_local_copy()
-        files_url = prev_task.artifacts["unopened_files"].get_local_copy()
-        results = pd.read_csv(results_url, compression='gzip')
-
-        # continue executing process on remaining .tif files if any exist
-        unopened_files = pickle.load(open(files_url, "rb"), encoding='latin1')
-        print(f"Picking up from {len(unopened_files)} unopened file(s)")
-
-    # if no previous task or no artifacts found, initialize new `results` dataframe
-    except (IndexError, KeyError, IsADirectoryError):
-        # keep only the relevant columns
-        results = ctry[["ETH_LG_R", "ETH_NO", "ISO_LANGUA", "COUNTRY_IS"]]
-        results.rename(columns={"ISO_LANGUA": "ISO_639", "COUNTRY_IS": "COUNTRY"}, inplace=True)
-        results["Centroid"] = [p.centroid for i,p in poly_list] # identify polygons by their centroid
-        results["Population"] = 0 # add new column to store population estimates
-
-        # initialize list of .tif files from population data in randomized order
-        unopened_files = [file for file in os.listdir(population_data) if file[-4:] == ".tif"]
-        random.shuffle(unopened_files)
-
-    task.register_artifact(name=f'{ctry_name}', artifact=results)
-    del data
-    del grouped
-    del ctry
-    gc.collect()
-
-    # process the data to generate population estimates for each language
-    while len(unopened_files) > 0:
-        file = unopened_files.pop()
-        process(file, poly_list, results, file_dir=population_data, allow_overcounts=False)
-        # Save progress in ClearML
-        task.upload_artifact(name="unopened_files", artifact_object=unopened_files)
-
-    # If all .tif files have been processed, generate aggregate data to show total population counts for each language
-    aggregate = results.groupby(["ETH_LG_R", "ETH_NO", "ISO_639", "COUNTRY"]).sum().reset_index()
-    task.upload_artifact(name=f'{ctry_name}_Totals', artifact_object=aggregate)
-
-
-if __name__ == '__main__':
     main()
